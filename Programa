@@ -1,0 +1,334 @@
+//MADE PT by ALACYTE 08/11/2015 Versão: V2.0
+#include <SoftwareSerial.h>
+#include "DHT.h"
+#include <SFE_BMP180.h>
+#include <Wire.h>
+#include "MQ135.h"
+
+
+#define ALTITUDE 674.0 // Altitude of bg
+#define DHTPIN 4     // what digital pin we're connected to
+#define DHTTYPE DHT22   // DHT 22  (AM2302), AM2321
+#define RZERO 310 // 76.63 CO2 para BG
+
+DHT dht(DHTPIN, DHTTYPE);
+SFE_BMP180 pressure;
+
+
+
+//DHT22
+float h,t,f,hif,hic;
+
+//BMP180
+char status;
+double T,P,p0,a;
+
+//MQ135
+int analogPin=0, i = 0;
+MQ135 gasSensor = MQ135(analogPin);
+double result, rzero;
+float ppm;
+
+//UV_ML8511
+int UVOUT = A1; //Output from the sensor
+int REF_3V3 = A2; //3.3V power on the Arduino board
+int uvLevel;
+float uvIntensity;
+
+// replace with your channel's thingspeak API key
+String apiKey = "AWV17156OTAWZAVE";
+
+// connect 2 to TX of Serial USB
+// connect 3 to RX of serial USB
+SoftwareSerial ser(2,3); // RX, TX
+//////////////////////////////////////////////////////////////
+
+// this runs once
+void setup() {                
+  pinMode(5, OUTPUT);
+  Serial.begin(9600); 
+  ser.begin(9600);
+   
+  Serial.println("DHT22 test!");
+  dht.begin();
+  
+   if (pressure.begin())
+    Serial.println("BMP180 init success");
+  else
+  {
+    // Oops, something went wrong, this is usually a connection problem, connections.
+    Serial.println("BMP180 init fail\n\n");
+    while(1); // Pause forever.
+  }
+//Define os pinos para o sensor UV
+    pinMode(UVOUT, INPUT);
+    pinMode(REF_3V3, INPUT);
+
+  // reset ESP8266
+  ser.println("AT+RST");
+}
+
+//////////////////////////////////////////////////////////////////
+// the loop 
+void loop() {
+  
+  SENSOR_DHT22();
+  SENSOR_BMP180();
+  SENSOR_CO2();
+  SENSOR_ML8511();
+  esp_8266();
+  PISCA();
+  
+}
+
+//////////////////////////////////////////////////////////
+void SENSOR_DHT22() {
+  // Wait a few seconds between measurements.
+  delay(2000);
+
+  h = dht.readHumidity();
+  // Read temperature as Celsius (the default)
+  t = dht.readTemperature();
+  // Read temperature as Fahrenheit (isFahrenheit = true)
+  f = dht.readTemperature(true);
+
+  // Check if any reads failed and exit early (to try again).
+  if (isnan(h) || isnan(t) || isnan(f)) {
+    Serial.println("Failed to read from DHT sensor!");
+    return;
+  }
+
+  // Compute heat index in Fahrenheit (the default)
+  hif = dht.computeHeatIndex(f, h);
+  // Compute heat index in Celsius (isFahreheit = false)
+  hic = dht.computeHeatIndex(t, h, false);
+
+  Serial.print("Humidity: ");
+  Serial.print(h);
+  Serial.print(" %\t");
+  Serial.print("Temperature: ");
+  Serial.print(t);
+  Serial.print(" *C ");
+  Serial.print(f);
+  Serial.print(" *F\t");
+  Serial.print("Heat index: ");
+  Serial.print(hic);
+  Serial.print(" *C ");
+  Serial.print(hif);
+  Serial.println(" *F");
+}
+//////////////////////////////////////////////////////////
+void SENSOR_BMP180()
+{
+  
+  
+  Serial.println();
+  Serial.print("provided altitude: ");
+  Serial.print(ALTITUDE,0);
+  Serial.print(" meters, ");
+  Serial.print(ALTITUDE*3.28084,0);
+  Serial.println(" feet");
+  
+  status = pressure.startTemperature();
+  if (status != 0)
+  {
+    // Wait for the measurement to complete:
+    delay(status);
+
+    status = pressure.getTemperature(T);
+    if (status != 0)
+    {
+      // Print out the measurement:
+      Serial.print("temperature: ");
+      Serial.print(T,2);
+      Serial.print(" deg C, ");
+      // Start a pressure measurement:
+
+      status = pressure.startPressure(3);
+      if (status != 0)
+      {
+        // Wait for the measurement to complete:
+        delay(status);
+
+        status = pressure.getPressure(P,T);
+        if (status != 0)
+        {
+          // Print out the measurement:
+          Serial.print("absolute pressure: ");
+          Serial.print(P,2);
+          Serial.print(" mb, ");
+          Serial.print(P*0.0295333727,2);
+          Serial.println(" inHg");
+
+
+          p0 = pressure.sealevel(P,ALTITUDE); // we're at 1655 meters (Boulder, CO)
+          Serial.print("relative (sea-level) pressure: ");
+          Serial.print(p0,2);
+          Serial.print(" mb, ");
+          Serial.print(p0*0.0295333727,2);
+          Serial.println(" inHg");
+
+          a = pressure.altitude(P,p0);
+          Serial.print("computed altitude: ");
+          Serial.print(a,0);
+          Serial.print(" meters, ");
+          Serial.print(a*3.28084,0);
+          Serial.println(" feet");
+        }
+        else Serial.println("error retrieving pressure measurement\n");
+      }
+      else Serial.println("error starting pressure measurement\n");
+    }
+    else Serial.println("error retrieving temperature measurement\n");
+  }
+  else Serial.println("error starting temperature measurement\n");
+
+  delay(5000);  // Pause for 5 seconds.
+}
+////////////////////////////////////////////////////////
+void SENSOR_CO2() {
+ if (i==0) {
+   rzero = gasSensor.getRZero(); // float
+ }
+ if (i>0) {  
+   result = gasSensor.getRZero();
+   rzero = (rzero + result)/2;
+  }
+  
+  ppm = gasSensor.getPPM();
+  
+  Serial.print(rzero);
+  Serial.print(", ");
+  Serial.print(result);
+  Serial.print(", ");
+  Serial.print(ppm);
+  Serial.println(" ppm");
+  i++;
+  delay(500);
+}
+////////////////////////////////////////////////////////
+void SENSOR_ML8511()
+{
+  uvLevel = averageAnalogRead(UVOUT);
+  int refLevel = averageAnalogRead(REF_3V3);
+  
+  //Use the 3.3V power pin as a reference to get a very accurate output value from sensor
+  float outputVoltage = 3.3 / refLevel * uvLevel;
+  
+  uvIntensity = mapfloat(outputVoltage, 0.99, 2.8, 0.0, 15.0); //Convert the voltage to a UV intensity level
+
+  Serial.println("output: ");
+  Serial.print(refLevel);
+
+  Serial.println("ML8511 output: ");
+  Serial.print(uvLevel);
+
+  Serial.println(" / ML8511 voltage: ");
+  Serial.print(outputVoltage);
+
+  Serial.println(" / UV Intensity (mW/cm^2): ");
+  Serial.print(uvIntensity);
+  
+  Serial.println();
+  
+  delay(5000);
+}
+
+//Takes an average of readings on a given pin
+//Returns the average
+int averageAnalogRead(int pinToRead)
+{
+  byte numberOfReadings = 8;
+  unsigned int runningValue = 0; 
+
+  for(int x = 0 ; x < numberOfReadings ; x++)
+    runningValue += analogRead(pinToRead);
+  runningValue /= numberOfReadings;
+
+  return(runningValue);  
+}
+
+//The Arduino Map function but for floats
+//From: http://forum.arduino.cc/index.php?topic=3922.0
+float mapfloat(float x, float in_min, float in_max, float out_min, float out_max)
+{
+  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
+////////////////////////////////////////////////////////
+void esp_8266()
+{
+ // convert to string
+  char buf[32];
+  String str_t = dtostrf( t, 4, 1, buf);
+  Serial.print(str_t);
+  Serial.println(" C");
+  String str_h = dtostrf( h, 4, 1, buf);
+  Serial.print(str_h);
+  Serial.println(" %");
+  String str_hic = dtostrf( hic, 4, 1, buf);
+  Serial.print(str_hic);
+  Serial.println(" %");
+  String str_p0 = dtostrf( p0, 4, 1, buf);
+  Serial.print(str_p0);
+  Serial.println(" mBar");
+  String str_ppm = dtostrf( ppm, 4, 1, buf);
+  Serial.print(str_ppm);
+  Serial.println(" ppm");
+   String str_uvIntensity = dtostrf( uvIntensity, 4, 1, buf);
+  Serial.print(str_uvIntensity);
+  Serial.println(" ");
+  
+  // TCP connection
+  String cmd = "AT+CIPSTART=\"TCP\",\"";
+  cmd += "184.106.153.149"; // api.thingspeak.com
+  cmd += "\",80";
+  ser.println(cmd);
+   
+  if(ser.find("Error")){
+    Serial.println("AT+CIPSTART error");
+    return;
+  }
+  
+  // prepare GET string
+  String getStr = "GET /update?api_key=";
+  getStr += apiKey;
+  getStr +="&field1=";
+  getStr += String(str_t);
+  getStr +="&field2=";
+  getStr += String(str_h);
+  getStr +="&field3=";
+  getStr += String(str_p0);
+  getStr +="&field4=";
+  getStr += String(str_ppm);
+  
+  getStr +="&field6=";
+  getStr += String(str_hic);
+  getStr +="&field7=";
+  getStr += String(str_uvIntensity);
+  getStr += "\r\n\r\n";
+
+  // send data length
+  cmd = "AT+CIPSEND=";
+  cmd += String(getStr.length());
+  ser.println(cmd);
+
+  if(ser.find(">")){
+    ser.print(getStr);
+  }
+  else{
+    ser.println("AT+CIPCLOSE");
+    // alert user
+    Serial.println("AT+CIPCLOSE");
+  }
+    
+  // thingspeak needs 15 sec delay between updates
+  delay(16000);  
+}
+
+void PISCA(){
+  digitalWrite(5, HIGH);   // turn the LED on (HIGH is the voltage level)
+  delay(500);              // wait for a second
+  digitalWrite(5, LOW);    // turn the LED off by making the voltage LOW
+  delay(500);  
+  
+  }
